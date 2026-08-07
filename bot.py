@@ -1,8 +1,9 @@
 import os
 import asyncio
 from pyrogram import Client, filters
+from aiohttp import web
 
-# جلب البيانات من إعدادات السيرفر (Environment Variables)
+# جلب البيانات من إعدادات السيرفر
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -19,7 +20,6 @@ async def split_cmd(client, message):
     url = args[1]
     msg = await message.reply_text("⬇️ جاري التنزيل...")
 
-    # التنزيل
     os.system(f'aria2c -x 16 -s 16 "{url}" -o input_file')
     
     await msg.edit_text("✂️ جاري التجزئة...")
@@ -34,6 +34,31 @@ async def split_cmd(client, message):
 
     if os.path.exists('input_file'):
         os.remove('input_file')
+    
+    await msg.edit_text("✅ تم الانتهاء بنجاح!")
+
+# سيرفر خفيف لإرضاء منصة Render المجانية
+async def handle(request):
+    return web.Response(text="Bot is alive!")
+
+async def start_web_server():
+    server = web.Application()
+    server.router.add_get('/', handle)
+    runner = web.AppRunner(server)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+
+async def main():
+    await start_web_server()
+    print("🚀 البوت والسيرفر يعملان الآن.")
+    await app.start()
+    await asyncio.Event().wait()
+
+if __name__ == "__main__":
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())
     
     await msg.edit_text("✅ تم الانتهاء بنجاح!")
 
