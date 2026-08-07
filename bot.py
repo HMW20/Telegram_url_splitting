@@ -8,7 +8,6 @@ API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-# زيادة الـ Workers لضمان معالجة الاتصالات بأعلى كفاءة
 app = Client(
     "my_bot", 
     api_id=API_ID, 
@@ -17,11 +16,9 @@ app = Client(
     workers=16
 )
 
-# متغيّرات الحالة
 is_cancelled = False
 pending_links = {} 
 
-# لوحة الزر الشفاف للإلغاء
 cancel_markup = InlineKeyboardMarkup([
     [InlineKeyboardButton("❌ إلغاء العملية", callback_data="cancel_process")]
 ])
@@ -47,16 +44,24 @@ async def process_splitting(client, message, url):
             "⏳ جاري جلب الملف بأقصى سرعة عبر (Aria2 x16)...",
             reply_markup=cancel_markup
         )
-        process = await asyncio.create_subprocess_shell(
-            f'aria2c -x 16 -s 16 -k 1M --summary-interval=5 "{url}" -o input_file'
-        )
-        while process.returncode is None:
-            if is_cancelled: 
-                process.kill()
-                cleanup_and_kill()
-                return
-            await asyncio.sleep(1)
-            
+        
+        # حيلة User-Agent لمنع السيرفرات من إرجاع خطأ 502/403
+        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+        cmd_aria = f'aria2c -x 16 -s 16 -k 1M --user-agent="{user_agent}" --summary-interval=5 "{url}" -o input_file'
+        
+        process = await asyncio.create_subprocess_shell(cmd_aria)
+        
+        # انتظار انتهاء العملية
+        await process.wait()
+
+        # تفقد هل نجح التنزيل فعلياً وهل الملف موجود؟
+        if process.returncode != 0 or not os.path.exists('input_file'):
+            try: await msg_download.delete()
+            except: pass
+            await message.reply_text("❌ **فشل تنزيل الملف!**\nالرابط غير صالح أو أن خادم الملفات رفض الاتصال.")
+            cleanup_and_kill()
+            return
+
         try: await msg_download.delete()
         except: pass
         await message.reply_text("✅ **انتهت مرحلة التنزيل بنجاح!**")
@@ -67,13 +72,16 @@ async def process_splitting(client, message, url):
             "⚙️ جاري تقسيم الملف لأجزاء بحجم **1 جيجابايت** بنمط القص الفائق بدون ضغط...",
             reply_markup=cancel_markup
         )
+        
         process7z = await asyncio.create_subprocess_shell('7z a -v1000m -mx0 part.7z input_file')
-        while process7z.returncode is None:
-            if is_cancelled: 
-                process7z.kill()
-                cleanup_and_kill()
-                return
-            await asyncio.sleep(1)
+        await process7z.wait()
+
+        if process7z.returncode != 0:
+            try: await msg_split.delete()
+            except: pass
+            await message.reply_text("❌ **حدث خطأ أثناء تجزئة الملف!**")
+            cleanup_and_kill()
+            return
 
         if os.path.exists('input_file'): 
             os.remove('input_file')
@@ -82,8 +90,13 @@ async def process_splitting(client, message, url):
         except: pass
         await message.reply_text("✅ **انتهت مرحلة تجزئة الملف بنجاح!**")
 
-        # === المرحلة 3: الرفع (بدون تحديثات تقدم لمنع البطء) ===
+        # === المرحلة 3: الرفع ===
         files = sorted([f for f in os.listdir('.') if f.startswith('part.7z.')])
+        if not files:
+            await message.reply_text("❌ **لم يتم العثور على أجزاء مجزأة لرفعها!**")
+            cleanup_and_kill()
+            return
+
         for f in files:
             if is_cancelled: 
                 cleanup_and_kill()
@@ -92,11 +105,10 @@ async def process_splitting(client, message, url):
             status_msg = await message.reply_text(
                 f"🚀 **المرحلة [3/3]: جاري رفع الجزء إلى تليجرام...**\n\n"
                 f"📄 **الملف:** `{f}`\n\n"
-                f"⚡ *تم تفعيل النمط السريع (خام) لضمان أقصى سرعة رفع ممكنة.*",
+                f"⚡ *تم تفعيل النمط السريع لضمان أقصى سرعة رفع ممكنة.*",
                 reply_markup=cancel_markup
             )
             
-            # الرفع المباشر بدون تمرير دالة progress لتوفير الموارد ومواضيع الاتصال
             await message.reply_document(document=f)
             
             try: await status_msg.delete()
@@ -157,7 +169,7 @@ async def start_web_server():
 async def main():
     await start_web_server()
     await app.start()
-    print("🚀 البوت يعمل الآن بالتحديث والتسلسل الجديد بأقصى أداء.")
+    print("🚀 البوت يعمل الآن بالتحديث المستقر والتسلسل المباشر.")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
