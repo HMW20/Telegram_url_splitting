@@ -12,30 +12,34 @@ app = Client("my_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 @app.on_message(filters.command("split") & filters.private)
 async def split_cmd(client, message):
-    args = message.text.split()
-    if len(args) < 2:
-        await message.reply_text("❌ الاستخدام: `/split [الرابط]`")
-        return
+    try:
+        args = message.text.split()
+        if len(args) < 2:
+            await message.reply_text("❌ الاستخدام: `/split [الرابط]`")
+            return
 
-    url = args[1]
-    msg = await message.reply_text("⬇️ جاري التنزيل...")
+        url = args[1]
+        msg = await message.reply_text("⬇️ جاري التنزيل...")
 
-    os.system(f'aria2c -x 16 -s 16 "{url}" -o input_file')
-    
-    await msg.edit_text("✂️ جاري التجزئة...")
-    os.system('7z a -v500m part.7z input_file')
+        os.system(f'aria2c -x 16 -s 16 "{url}" -o input_file')
+        
+        await msg.edit_text("✂️ جاري التجزئة...")
+        os.system('7z a -v500m part.7z input_file')
 
-    await msg.edit_text("⬆️ جاري الرفع...")
+        await msg.edit_text("⬆️ جاري الرفع...")
 
-    files = sorted([f for f in os.listdir('.') if f.startswith('part.7z.')])
-    for f in files:
-        await message.reply_document(document=f)
-        os.remove(f)
+        files = sorted([f for f in os.listdir('.') if f.startswith('part.7z.')])
+        for f in files:
+            await message.reply_document(document=f)
+            os.remove(f)
 
-    if os.path.exists('input_file'):
-        os.remove('input_file')
-    
-    await msg.edit_text("✅ تم الانتهاء بنجاح!")
+        if os.path.exists('input_file'):
+            os.remove('input_file')
+        
+        await msg.edit_text("✅ تم الانتهاء بنجاح!")
+
+    except Exception as e:
+        await message.reply_text(f"❌ حدث خطأ: {str(e)}")
 
 # سيرفر خفيف لإرضاء منصة Render المجانية
 async def handle(request):
@@ -59,8 +63,3 @@ async def main():
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.run_until_complete(main())
-    
-    await msg.edit_text("✅ تم الانتهاء بنجاح!")
-
-print("🚀 البوت يعمل الآن.")
-app.run()
