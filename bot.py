@@ -2,7 +2,7 @@ import os
 import asyncio
 import time
 from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiohttp import web
 
 API_ID = int(os.environ.get("API_ID"))
@@ -59,15 +59,28 @@ async def process_splitting(client, message, url):
     global is_cancelled
     is_cancelled = False
     try:
-        # المرحلة 1
-        msg1 = await message.reply_text("📡 **المرحلة [1/3]: بدء التنزيل**\n\n⏳ جاري جلب الملف عبر سيرفرات سريعة (Aria2 x16)...", reply_markup=cancel_markup)
+        # === المرحلة 1: التنزيل ===
+        msg_download = await message.reply_text(
+            "📡 **المرحلة [1/3]: بدء التنزيل**\n\n"
+            "⏳ جاري جلب الملف عبر سيرفرات سريعة (Aria2 x16)...",
+            reply_markup=cancel_markup
+        )
         process = await asyncio.create_subprocess_shell(f'aria2c -x 16 -s 16 --summary-interval=5 "{url}" -o input_file')
         while process.returncode is None:
             if is_cancelled: process.kill(); cleanup_and_kill(); return
             await asyncio.sleep(1)
             
-        # المرحلة 2
-        await msg1.edit_text("✂️ **المرحلة [2/3]: معالجة الملف والتجزئة**\n\n⚙️ اكتمل التنزيل! جاري تقسيم الملف لأجزاء (1 جيجابايت) بنمط القص الفائق...", reply_markup=cancel_markup)
+        # إشعار انتهاء التنزيل وحذف رسالة المرحلة 1
+        try: await msg_download.delete()
+        except: pass
+        await message.reply_text("✅ **انتهت مرحلة التنزيل بنجاح!**")
+
+        # === المرحلة 2: التجزئة ===
+        msg_split = await message.reply_text(
+            "✂️ **المرحلة [2/3]: معالجة الملف والتجزئة**\n\n"
+            "⚙️ جاري تقسيم الملف لأجزاء بحجم **1 جيجابايت** بنمط القص الفائق بدون ضغط...",
+            reply_markup=cancel_markup
+        )
         process7z = await asyncio.create_subprocess_shell('7z a -v1000m -mx0 part.7z input_file')
         while process7z.returncode is None:
             if is_cancelled: process7z.kill(); cleanup_and_kill(); return
@@ -75,21 +88,39 @@ async def process_splitting(client, message, url):
 
         if os.path.exists('input_file'): os.remove('input_file')
 
-        # المرحلة 3
-        await msg1.edit_text("📤 **المرحلة [3/3]: جاري رفع الأجزاء إلى تليجرام**\n\nبرجاء الانتظار لحين تحضير ورفع كافة الأجزاء...")
+        # إشعار انتهاء التجزئة وحذف رسالة المرحلة 2
+        try: await msg_split.delete()
+        except: pass
+        await message.reply_text("✅ **انتهت مرحلة تجزئة الملف بنجاح!**")
+
+        # === المرحلة 3: الرفع ===
         files = sorted([f for f in os.listdir('.') if f.startswith('part.7z.')])
         for f in files:
             if is_cancelled: cleanup_and_kill(); return
-            status_msg = await message.reply_text(f"📦 **جاري تحضير الجزء:** `{f}`...", reply_markup=cancel_markup)
+            
+            status_msg = await message.reply_text(
+                f"📦 **جاري تحضير الجزء:** `{f}`...",
+                reply_markup=cancel_markup
+            )
             start_time = time.time()
-            await message.reply_document(document=f, progress=progress, progress_args=(client, status_msg, start_time, f))
-            await status_msg.delete()
+            
+            await message.reply_document(
+                document=f,
+                progress=progress,
+                progress_args=(client, status_msg, start_time, f)
+            )
+            try: await status_msg.delete()
+            except: pass
+            
             if os.path.exists(f): os.remove(f)
 
-        if not is_cancelled: await message.reply_text("🎉 **تمت العملية بنجاح!**\n\n✅ تم تنزيل وتجزئة ورفع جميع الأجزاء بنجاح وبأعلى سلامة للبيانات.")
+        if not is_cancelled:
+            await message.reply_text("🎉 **تمت العملية بنجاح!**\n\n✅ تم تنزيل وتجزئة ورفع جميع الأجزاء بنجاح وبأعلى سلامة للبيانات.")
+
     except Exception as e:
         cleanup_and_kill()
-        if str(e) != "CANCELLED": await message.reply_text(f"❌ **حدث خطأ أثناء تنفيذ العملية:**\n`{str(e)}`")
+        if str(e) != "CANCELLED":
+            await message.reply_text(f"❌ **حدث خطأ أثناء تنفيذ العملية:**\n`{str(e)}`")
 
 @app.on_message(filters.command("split") & filters.private)
 async def split_cmd(client, message):
@@ -134,7 +165,7 @@ async def start_web_server():
 async def main():
     await start_web_server()
     await app.start()
-    print("🚀 البوت يعمل الآن بكامل أناقته وميزاته.")
+    print("🚀 البوت يعمل الآن بالتحديث والتسلسل الجديد.")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
