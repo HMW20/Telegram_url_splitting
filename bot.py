@@ -1,6 +1,7 @@
 import os
 import asyncio
 import time
+import re
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiohttp import web
@@ -28,7 +29,7 @@ def cleanup_and_kill():
         try: os.remove('input_file')
         except: pass
     for f in os.listdir('.'):
-        if f.startswith('part.7z.'):
+        if re.match(r'^part\.7z\.\d+$', f):
             try: os.remove(f)
             except: pass
 
@@ -66,10 +67,18 @@ async def process_splitting(client, message, url):
             reply_markup=cancel_markup
         )
         process = await asyncio.create_subprocess_shell(f'aria2c -x 16 -s 16 --summary-interval=5 "{url}" -o input_file')
+        
+        # مراقبة عملية التنزيل مع دعم الإلغاء
         while process.returncode is None:
-            if is_cancelled: process.kill(); cleanup_and_kill(); return
+            if is_cancelled:
+                process.kill()
+                cleanup_and_kill()
+                return
             await asyncio.sleep(1)
-            
+
+        if process.returncode != 0:
+            raise Exception("فشل تنزيل الملف بواسطة Aria2.")
+
         # إشعار انتهاء التنزيل وحذف رسالة المرحلة 1
         try: await msg_download.delete()
         except: pass
@@ -82,11 +91,20 @@ async def process_splitting(client, message, url):
             reply_markup=cancel_markup
         )
         process7z = await asyncio.create_subprocess_shell('7z a -v1000m -mx0 part.7z input_file')
+        
+        # مراقبة عملية التجزئة مع دعم الإلغاء
         while process7z.returncode is None:
-            if is_cancelled: process7z.kill(); cleanup_and_kill(); return
+            if is_cancelled:
+                process7z.kill()
+                cleanup_and_kill()
+                return
             await asyncio.sleep(1)
 
-        if os.path.exists('input_file'): os.remove('input_file')
+        if process7z.returncode != 0:
+            raise Exception("فشل عملية تجزئة الملف بواسطة 7z.")
+
+        if os.path.exists('input_file'): 
+            os.remove('input_file')
 
         # إشعار انتهاء التجزئة وحذف رسالة المرحلة 2
         try: await msg_split.delete()
@@ -94,9 +112,16 @@ async def process_splitting(client, message, url):
         await message.reply_text("✅ **انتهت مرحلة تجزئة الملف بنجاح!**")
 
         # === المرحلة 3: الرفع ===
-        files = sorted([f for f in os.listdir('.') if f.startswith('part.7z.')])
+        # الفرز العددي لمنع رفع (part.7z.010) قبل (part.7z.002)
+        files = sorted(
+            [f for f in os.listdir('.') if re.match(r'^part\.7z\.\d+$', f)],
+            key=lambda x: int(x.split('.')[-1])
+        )
+
         for f in files:
-            if is_cancelled: cleanup_and_kill(); return
+            if is_cancelled: 
+                cleanup_and_kill()
+                return
             
             status_msg = await message.reply_text(
                 f"📦 **جاري تحضير الجزء:** `{f}`...",
@@ -112,7 +137,8 @@ async def process_splitting(client, message, url):
             try: await status_msg.delete()
             except: pass
             
-            if os.path.exists(f): os.remove(f)
+            if os.path.exists(f): 
+                os.remove(f)
 
         if not is_cancelled:
             await message.reply_text("🎉 **تمت العملية بنجاح!**\n\n✅ تم تنزيل وتجزئة ورفع جميع الأجزاء بنجاح وبأعلى سلامة للبيانات.")
@@ -153,7 +179,8 @@ async def start_cmd(client, message):
 async def help_cmd(client, message):
     await message.reply_text("📖 **دليل الاستخدام:**\n\n1️⃣ أرسل `/split`.\n2️⃣ أرسل الرابط في رسالة مستقلة.\n3️⃣ البوت سيقوم بالتنزيل والتجزئة والرفع تلقائياً.")
 
-async def handle(request): return web.Response(text="Bot is alive!")
+async def handle(request): 
+    return web.Response(text="Bot is alive!")
 
 async def start_web_server():
     server = web.Application()
