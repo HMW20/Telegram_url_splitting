@@ -11,9 +11,17 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 app = Client("my_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
+# متغيّرات الحالة
+last_update_time = {}
 is_cancelled = False
+pending_links = {} 
 
-def cleanup():
+# لوحة الزر الشفاف للإلغاء
+cancel_markup = InlineKeyboardMarkup([
+    [InlineKeyboardButton("❌ إلغاء العملية", callback_data="cancel_process")]
+])
+
+def cleanup_and_kill():
     os.system("pkill -f aria2c")
     os.system("pkill -f 7z")
     if os.path.exists('input_file'):
@@ -24,81 +32,170 @@ def cleanup():
             try: os.remove(f)
             except: pass
 
-async def progress(current, total, message):
-    # تقليل التحديثات لزيادة سرعة الرفع
-    if current % (1024 * 1024 * 50) == 0:  # تحديث كل 50 ميجا فقط
-        try:
-            await message.edit_text(f"🚀 الرفع: {current * 100 / total:.1f}%")
+async def progress(current, total, client, message, start_time, filename):
+    global is_cancelled
+    if is_cancelled: 
+        raise Exception("CANCELLED")
+    
+    now = time.time()
+    msg_id = message.id
+    # تحديث كل 4 ثوانٍ لمنع حظر FloodWait من تليجرام وحفظ سرعة الرفع
+    if msg_id not in last_update_time or (now - last_update_time[msg_id]) > 4:
+        last_update_time[msg_id] = now
+        percentage = current * 100 / total
+        speed = current / (now - start_time) if (now - start_time) > 0 else 0
+        current_mb = current / (1024 * 1024)
+        total_mb = total / (1024 * 1024)
+        speed_mb = speed / (1024 * 1024)
+        progress_bar = "".join(["▰" if i < int(percentage / 10) else "▱" for i in range(10)])
+        
+        text = (f"🚀 **جاري رفع الملف إلى تليجرام...**\n\n"
+                f"📄 **الملف:** `{filename}`\n"
+                f"[{progress_bar}] **{percentage:.1f}%**\n\n"
+                f"⚡ **السرعة الحالية:** `{speed_mb:.2f} MB/s`\n"
+                f"📊 **حجم البيانات:** `{current_mb:.1f} MB` / `{total_mb:.1f} MB`")
+        try: 
+            await message.edit_text(text, reply_markup=cancel_markup)
         except: pass
 
 async def process_splitting(client, message, url):
     global is_cancelled
     is_cancelled = False
-    
     try:
-        # === 1. التنزيل ===
-        msg = await message.reply_text("📡 جاري التنزيل...")
-        
-        proc = await asyncio.create_subprocess_shell(
-            f'aria2c -x 16 -s 16 "{url}" -o input_file',
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL
+        # === المرحلة 1: التنزيل ===
+        msg_download = await message.reply_text(
+            "📡 **المرحلة [1/3]: بدء التنزيل**\n\n"
+            "⏳ جاري جلب الملف عبر سيرفرات سريعة (Aria2 x16)...",
+            reply_markup=cancel_markup
         )
-        await proc.wait()
+        
+        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/115.0.0.0 Safari/537.36"
+        cmd_aria = f'aria2c -x 16 -s 16 -k 1M --user-agent="{user_agent}" --summary-interval=5 "{url}" -o input_file'
+        
+        process = await asyncio.create_subprocess_shell(cmd_aria)
+        await process.wait()
 
-        # فحص جودة الملف
-        if not os.path.exists('input_file') or os.path.getsize('input_file') < 1024 * 1024:
-            await msg.edit_text("❌ فشل التحميل (الملف تالف أو غير موجود).")
-            cleanup()
+        # فحص جودة التحميل لمنع إرسال أراشيف تالفة (إذا كان أقل من 1 ميجا إذن التحميل فشل)
+        file_exists = os.path.exists('input_file')
+        file_size = os.path.getsize('input_file') if file_exists else 0
+        
+        if process.returncode != 0 or not file_exists or file_size < 1024 * 1024:
+            try: await msg_download.delete()
+            except: pass
+            await message.reply_text("❌ **فشل التنزيل!**\nالرابط غير صالح أو خادم الملفات يُرجع خطأ. لم يتم استلام الملف كاملاً.")
+            cleanup_and_kill()
             return
 
-        # === 2. التجزئة ===
-        await msg.edit_text("✂️ جاري التجزئة...")
-        proc7z = await asyncio.create_subprocess_shell('7z a -v1000m -mx0 part.7z input_file')
-        await proc7z.wait()
-        
-        if os.path.exists('input_file'): os.remove('input_file')
+        try: await msg_download.delete()
+        except: pass
+        await message.reply_text("✅ **انتهت مرحلة التنزيل بنجاح!**")
 
-        # === 3. الرفع ===
+        # === المرحلة 2: التجزئة ===
+        msg_split = await message.reply_text(
+            "✂️ **المرحلة [2/3]: معالجة الملف والتجزئة**\n\n"
+            "⚙️ جاري تقسيم الملف لأجزاء بحجم **1 جيجابايت** بنمط القص الفائق بدون ضغط...",
+            reply_markup=cancel_markup
+        )
+        process7z = await asyncio.create_subprocess_shell('7z a -v1000m -mx0 part.7z input_file')
+        await process7z.wait()
+
+        if process7z.returncode != 0:
+            try: await msg_split.delete()
+            except: pass
+            await message.reply_text("❌ **حدث خطأ أثناء تجزئة الملف!**")
+            cleanup_and_kill()
+            return
+
+        if os.path.exists('input_file'): 
+            os.remove('input_file')
+
+        try: await msg_split.delete()
+        except: pass
+        await message.reply_text("✅ **انتهت مرحلة تجزئة الملف بنجاح!**")
+
+        # === المرحلة 3: الرفع ===
         files = sorted([f for f in os.listdir('.') if f.startswith('part.7z.')])
+        
+        if not files:
+            await message.reply_text("❌ لم يتم العثور على أجزاء مجزأة لرفعها.")
+            cleanup_and_kill()
+            return
+
         for f in files:
-            if is_cancelled: break
-            await msg.edit_text(f"📦 جاري رفع: {f}")
-            await message.reply_document(f, progress=progress, progress_args=(message,))
-            os.remove(f)
+            if is_cancelled: 
+                cleanup_and_kill()
+                return
+            
+            status_msg = await message.reply_text(
+                f"📦 **جاري تحضير ورفع الجزء:** `{f}`...",
+                reply_markup=cancel_markup
+            )
+            start_time = time.time()
+            
+            await message.reply_document(
+                document=f,
+                progress=progress,
+                progress_args=(client, status_msg, start_time, f)
+            )
+            try: await status_msg.delete()
+            except: pass
+            
+            if os.path.exists(f): 
+                os.remove(f)
 
         if not is_cancelled:
-            await msg.edit_text("✅ تمت العملية بنجاح.")
+            await message.reply_text("🎉 **تمت العملية بنجاح!**\n\n✅ تم تنزيل وتجزئة ورفع جميع الأجزاء بنجاح وبأعلى سلامة للبيانات.")
 
     except Exception as e:
-        await message.reply_text(f"❌ خطأ: {e}")
-    finally:
-        cleanup()
+        cleanup_and_kill()
+        if str(e) != "CANCELLED":
+            await message.reply_text(f"❌ **حدث خطأ أثناء تنفيذ العملية:**\n`{str(e)}`")
 
 @app.on_message(filters.command("split") & filters.private)
 async def split_cmd(client, message):
-    if len(message.command) > 1:
-        await process_splitting(client, message, message.command[1])
+    args = message.text.split()
+    if len(args) > 1:
+        await process_splitting(client, message, args[1])
     else:
-        await message.reply_text("أرسل الرابط الآن.")
+        pending_links[message.chat.id] = True
+        await message.reply_text("🔗 **أهلاً بك!**\n\nالرجاء إرسال رابط الملف الآن في رسالة مستقلة وسأبدأ المعالجة فوراً.\n\n💡 *ملاحظة: يمكنك الإلغاء في أي لحظة عبر الزر الشفاف.*")
+
+@app.on_message(filters.text & filters.private & ~filters.command(["start", "split", "help"]))
+async def text_handler(client, message):
+    if pending_links.get(message.chat.id):
+        pending_links[message.chat.id] = False
+        await process_splitting(client, message, message.text)
 
 @app.on_callback_query(filters.regex("cancel_process"))
 async def cancel_callback(client, callback_query):
     global is_cancelled
     is_cancelled = True
-    cleanup()
-    await callback_query.message.edit_text("🚫 تم الإلغاء.")
+    cleanup_and_kill()
+    pending_links[callback_query.message.chat.id] = False
+    await callback_query.message.edit_text("🚫 **تم إلغاء العملية بالكامل وتنظيف السيرفر!**\n\nيمكنك إرسال رابط جديد في أي وقت.")
 
-# === Web Server للمحافظة على نشاط البوت ===
+@app.on_message(filters.command("start") & filters.private)
+async def start_cmd(client, message):
+    await message.reply_text("✨ **أهلاً بك في بوت التجزئة والرفع السريع!** 🤖\n\n📌 **طريقة البدء:** أرسل `/split` متبوعاً برابط الملف، أو اضغط `/split` وسأطلب منك الرابط.")
+
+@app.on_message(filters.command("help") & filters.private)
+async def help_cmd(client, message):
+    await message.reply_text("📖 **دليل الاستخدام:**\n\n1️⃣ أرسل `/split`.\n2️⃣ أرسل الرابط في رسالة مستقلة.\n3️⃣ البوت سيقوم بالتنزيل والتجزئة والرفع تلقائياً.")
+
+async def handle(request): 
+    return web.Response(text="Bot is alive!")
+
 async def start_web_server():
-    app_web = web.Application()
-    runner = web.AppRunner(app_web)
+    server = web.Application()
+    server.router.add_get('/', handle)
+    runner = web.AppRunner(server)
     await runner.setup()
     await web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 8080))).start()
 
 async def main():
     await start_web_server()
     await app.start()
+    print("🚀 البوت يعمل الآن بالتصميم والتسلسل الكامل والتحديث المستقر.")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
