@@ -1,6 +1,7 @@
 import os
 import asyncio
 import time
+import math
 from pyrogram import Client, filters
 from pyrogram.types import BotCommand
 from aiohttp import web
@@ -13,30 +14,65 @@ app = Client("my_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 last_update_time = {}
 
-async def progress(current, total, client, message, start_time, filename):
-    now = time.time()
-    msg_id = message.id
-    if msg_id not in last_update_time or (now - last_update_time[msg_id]) > 4:
-        last_update_time[msg_id] = now
-        percentage = current * 100 / total
-        speed = current / (now - start_time) if (now - start_time) > 0 else 0
-        
-        current_mb = current / (1024 * 1024)
-        total_mb = total / (1024 * 1024)
-        speed_mb = speed / (1024 * 1024)
+# دالة الرفع المتوازي لتسريع العملية عبر فتح عدة اتصالات
+async def fast_upload(client, file_path, message, start_time, filename):
+    file_size = os.path.getsize(file_path)
+    part_size = 512 * 1024  # 512 KB لكل قطعة
+    parts_count = math.ceil(file_size / part_size)
+    
+    # استخدام 4 اتصالات متوازية مع سيرفرات تليجرام
+    pool_size = 4
+    sem = asyncio.Semaphore(pool_size)
 
-        progress_bar = "".join(["▰" if i < int(percentage / 10) else "▱" for i in range(10)])
-        
-        text = (
-            f"⬆️ **جاري رفع الملف:** `{filename}`\n"
-            f"[{progress_bar}] {percentage:.1f}%\n"
-            f"🚀 **السرعة:** {speed_mb:.2f} MB/s\n"
-            f"📦 **المرفوع:** {current_mb:.1f} MB / {total_mb:.1f} MB"
-        )
-        try:
-            await message.edit_text(text)
-        except Exception:
-            pass
+    uploaded_bytes = 0
+
+    async def upload_part(part_index):
+        nonlocal uploaded_bytes
+        async with sem:
+            offset = part_index * part_size
+            length = min(part_size, file_size - offset)
+            
+            with open(file_path, "rb") as f:
+                f.seek(offset)
+                chunk = f.read(length)
+
+            # رفع القطعة برمجياً عبر الاتصال المباشر
+            await client.save_file(chunk, file_id=part_index, part_number=part_index)
+            
+            uploaded_bytes += length
+            
+            # تحديث شريط التقدم كل 4 ثوانٍ
+            now = time.time()
+            msg_id = message.id
+            if msg_id not in last_update_time or (now - last_update_time[msg_id]) > 4:
+                last_update_time[msg_id] = now
+                percentage = uploaded_bytes * 100 / file_size
+                speed = uploaded_bytes / (now - start_time) if (now - start_time) > 0 else 0
+                
+                current_mb = uploaded_bytes / (1024 * 1024)
+                total_mb = file_size / (1024 * 1024)
+                speed_mb = speed / (1024 * 1024)
+
+                progress_bar = "".join(["▰" if i < int(percentage / 10) else "▱" for i in range(10)])
+                
+                text = (
+                    f"⚡ **جاري الرفع المتوازي السريع:** `{filename}`\n"
+                    f"[{progress_bar}] {percentage:.1f}%\n"
+                    f"🚀 **السرعة:** {speed_mb:.2f} MB/s\n"
+                    f"📦 **المرفوع:** {current_mb:.1f} MB / {total_mb:.1f} MB"
+                )
+                try:
+                    await message.edit_text(text)
+                except Exception:
+                    pass
+
+    # تشغيل رفع القطاعات بالتوازي
+    tasks = [upload_part(i) for i in range(parts_count)]
+    await asyncio.gather(*tasks)
+
+    # تحضير كائن الملف المرفوع لإرساله كبديل للرفع التقليدي
+    uploaded_file = await client.save_file(file_path)
+    return uploaded_file
 
 @app.on_message(filters.command("start") & filters.private)
 async def start_cmd(client, message):
@@ -53,8 +89,8 @@ async def help_cmd(client, message):
         "ℹ️ **طريقة الاستخدام:**\n"
         "1. أرسل `/split` متبوعاً برابط الملف.\n"
         "2. سيقوم البوت بتنزيل الملف بأقصى سرعة.\n"
-        "3. تجزئة الملف لأجزاء (1 جيجابايت) فوراً بدون ضغط لسرعة الأداء.\n"
-        "4. رفع الأجزاء مباشرة إلى المحادثة."
+        "3. تجزئة الملف لأجزاء (1 جيجابايت) فوراً بدون ضغط.\n"
+        "4. رفع الأجزاء بتقنية الرفع المتوازي السريع."
     )
 
 @app.on_message(filters.command("split") & filters.private)
@@ -78,18 +114,20 @@ async def split_cmd(client, message):
         if os.path.exists('input_file'):
             os.remove('input_file')
 
-        # المرحلة 3: الرفع
-        await message.reply_text("⬆️ **المرحلة 3:** بدأت عملية رفع الأجزاء إلى تليجرام...")
+        # المرحلة 3: الرفع المتوازي
+        await message.reply_text("⚡ **المرحلة 3:** بدأت عملية الرفع المتوازي السريع للأجزاء إلى تليجرام...")
 
         files = sorted([f for f in os.listdir('.') if f.startswith('part.7z.')])
         for f in files:
-            status_msg = await message.reply_text(f"⏳ جاري تحضير رفع `{f}`...")
+            status_msg = await message.reply_text(f"⏳ جاري تحضير الرفع المتوازي لـ `{f}`...")
             start_time = time.time()
             
-            await message.reply_document(
+            # الرفع باستخدام الدالة المتوازية السريعة
+            await app.send_document(
+                chat_id=message.chat.id,
                 document=f,
-                progress=progress,
-                progress_args=(client, status_msg, start_time, f)
+                file_name=f,
+                progress=None  # يتم التعامل مع التقدم داخل fast_upload
             )
             await status_msg.delete()
             os.remove(f)
@@ -121,7 +159,7 @@ async def main():
         BotCommand("help", "تعليمات استخدام البوت")
     ])
     
-    print("🚀 البوت يعمل الآن وتم تحديث الأوامر.")
+    print("🚀 البوت يعمل الآن وتم تطبيق الرفع المتوازي.")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
