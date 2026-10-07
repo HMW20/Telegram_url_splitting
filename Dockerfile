@@ -1,4 +1,4 @@
-FROM python:3.9-slim
+FROM python:3.15.0rc1-slim
 
 # تثبيت الأدوات الضرورية
 RUN apt-get update && apt-get install -y \
